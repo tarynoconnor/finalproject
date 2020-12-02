@@ -1,0 +1,82 @@
+---
+title: "Data Wrangling"
+author: "Taryn O'Connor"
+date: "11/18/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stringdist)
+```
+
+```{r message = FALSE}
+sen_2014 <- read_csv("raw_data/senate_2014.csv")
+sen_2016 <- read_csv("raw_data/senate_2016.csv")
+sen_2018 <- read_csv("raw_data/senate_2018.csv")
+sen_2020 <- read_csv("raw_data/senate_2020.csv")
+mit_data <- read_csv("raw_data/1976-2018-senate.csv") %>% 
+  arrange(desc(year))
+
+```
+
+
+```{r}
+fec <- rbind(sen_2014, sen_2016, sen_2018, sen_2020) %>% 
+  select(name, office, party, state, candidate_election_year, incumbent_challenge_full,
+         receipts, disbursements, cash_on_hand_end_period, candidate_id) %>% 
+  separate(name, into = c("last", "first_middle"), sep = ", ") %>% 
+  separate(first_middle, into = c("first", "middle"), sep = " ") %>% 
+  unite(full_name, "first", "last", sep = " ") %>% 
+  select(-middle) %>% 
+  mutate(full_name = tolower(full_name)) %>% 
+  mutate(full_name = str_to_title(full_name)) %>% 
+  filter(receipts > 0.00)
+
+fec
+vote_totals <- mit_data %>% 
+  group_by(year, state_po, special, candidate) %>% 
+  mutate(cand_totalvotes = sum(candidatevotes)) %>% 
+  mutate(vote_percentage = cand_totalvotes/totalvotes * 100) %>%
+  filter(writein == "FALSE") %>% 
+  select(year, state, state_po, special, candidate, cand_totalvotes, vote_percentage) %>% 
+  unique() %>% 
+  filter(vote_percentage >= 5) %>% 
+  arrange(desc(year))
+
+```
+
+```{r}
+name <- function(candidate, year, state_po){
+  fec %>% 
+    filter(state == state_po) %>% 
+    filter(candidate_election_year == year) %>% 
+    mutate(distance = map_dbl(full_name, ~ stringdist(., candidate))) %>% 
+    slice(which.min(distance)) %>% 
+    pull(candidate_id)
+}
+
+name("Mike Crapo", 2016, "ID")
+```
+
+```{r}
+name(vote_totals$candidate[1], vote_totals$year[1], vote_totals$state_po[1])
+
+vote_totals %>%
+  filter(year >= 2016) %>% 
+  mutate(fec_id = pmap_chr(list(candidate = candidate, 
+                                year = year, 
+                                state_po = state_po),
+                           .f = ~ name(candidate = ..1, 
+                                       year = ..2, 
+                                       state = ..3)))
+```
+
+```{r}
+fec %>% 
+    filter(state == "TX",
+           candidate_election_year == 2018) %>% 
+    mutate(distance = map_dbl(full_name, ~ stringdist(., "Beto O'Rourke")))
+```
+
