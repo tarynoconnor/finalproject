@@ -9,21 +9,44 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(stringdist)
+library(rstanarm)
 ```
 
-```{r message = FALSE}
+```{r message = FALSE, error = F}
+sen_1980 <- read_csv("raw_data/senate_1980.csv")
+sen_1982 <- read_csv("raw_data/senate_1982.csv")
+sen_1984 <- read_csv("raw_data/senate_1984.csv")
+sen_1986 <- read_csv("raw_data/senate_1986.csv")
+sen_1988 <- read_csv("raw_data/senate_1988.csv")
+sen_1990 <- read_csv("raw_data/senate_1990.csv")
+sen_1992 <- read_csv("raw_data/senate_1992.csv")
+sen_1994 <- read_csv("raw_data/senate_1994.csv")
+sen_1996 <- read_csv("raw_data/senate_1996.csv")
+sen_1998 <- read_csv("raw_data/senate_1998.csv")
+sen_2000 <- read_csv("raw_data/senate_2000.csv")
+sen_2002 <- read_csv("raw_data/senate_2002.csv")
+sen_2004 <- read_csv("raw_data/senate_2004.csv")
+sen_2006 <- read_csv("raw_data/senate_2006.csv")
+sen_2008 <- read_csv("raw_data/senate_2008.csv")
+sen_2010 <- read_csv("raw_data/senate_2010.csv")
+sen_2012 <- read_csv("raw_data/senate_2012.csv")
 sen_2014 <- read_csv("raw_data/senate_2014.csv")
 sen_2016 <- read_csv("raw_data/senate_2016.csv")
 sen_2018 <- read_csv("raw_data/senate_2018.csv")
 sen_2020 <- read_csv("raw_data/senate_2020.csv")
 mit_data <- read_csv("raw_data/1976-2018-senate.csv") %>% 
   arrange(desc(year))
-
 ```
 
 
-```{r}
-fec <- rbind(sen_2014, sen_2016, sen_2018, sen_2020) %>% 
+```{r message = FALSE}
+fec <- rbind(sen_1980, sen_1982, 
+             sen_1984, sen_1986, sen_1988, 
+             sen_1990, sen_1992, sen_1994, 
+             sen_1996, sen_1998, sen_2000, 
+             sen_2002, sen_2004, sen_2006, 
+             sen_2008, sen_2010, sen_2012, 
+             sen_2014, sen_2016, sen_2018, sen_2020) %>% 
   select(name, office, party, state, candidate_election_year, incumbent_challenge_full,
          receipts, disbursements, cash_on_hand_end_period, candidate_id) %>% 
   separate(name, into = c("last", "first_middle"), sep = ", ") %>% 
@@ -32,51 +55,179 @@ fec <- rbind(sen_2014, sen_2016, sen_2018, sen_2020) %>%
   select(-middle) %>% 
   mutate(full_name = tolower(full_name)) %>% 
   mutate(full_name = str_to_title(full_name)) %>% 
-  filter(receipts > 0.00)
+  filter(receipts > 0.00) %>% 
+  mutate(year = candidate_election_year)
 
-fec
 vote_totals <- mit_data %>% 
+  filter(year >= 1980) %>% 
+  filter(stage == "gen") %>% 
   group_by(year, state_po, special, candidate) %>% 
   mutate(cand_totalvotes = sum(candidatevotes)) %>% 
   mutate(vote_percentage = cand_totalvotes/totalvotes * 100) %>%
   filter(writein == "FALSE") %>% 
   select(year, state, state_po, special, candidate, cand_totalvotes, vote_percentage) %>% 
   unique() %>% 
-  filter(vote_percentage >= 5) %>% 
+  filter(vote_percentage >= 10) %>% 
+  filter(cand_totalvotes > 100) %>% 
   arrange(desc(year))
 
 ```
+
+
 
 ```{r}
 name <- function(candidate, year, state_po){
   fec %>% 
     filter(state == state_po) %>% 
-    filter(candidate_election_year == year) %>% 
+    filter(year == year) %>% 
     mutate(distance = map_dbl(full_name, ~ stringdist(., candidate))) %>% 
     slice(which.min(distance)) %>% 
     pull(candidate_id)
 }
-
-name("Mike Crapo", 2016, "ID")
 ```
 
 ```{r}
-name(vote_totals$candidate[1], vote_totals$year[1], vote_totals$state_po[1])
-
-vote_totals %>%
-  filter(year >= 2016) %>% 
-  mutate(fec_id = pmap_chr(list(candidate = candidate, 
-                                year = year, 
+fec_id_vote <- vote_totals %>%
+  mutate(candidate_id = pmap_chr(list(candidate = candidate, 
+                                candidate_election_year = year, 
                                 state_po = state_po),
                            .f = ~ name(candidate = ..1, 
                                        year = ..2, 
                                        state = ..3)))
 ```
 
+
+```{r}
+contribution_votes <- left_join(fec_id_vote, fec, 
+                                 by = c("candidate_id", "year")) %>% 
+  mutate(year = as.character(year)) %>% 
+  mutate(party = ifelse(party == "DFL", "DEM", party))
+```
+
+
+```{r model p1}
+model <- stan_glm(data = contribution_votes,
+         vote_percentage ~ disbursements,
+         family = gaussian(),
+         refresh = 0)
+
+print(model, digits = 9)
+
+#change disbursements to thousands
+
+model_4 <- stan_glm(data = contribution_votes,
+         vote_percentage ~ disbursements + year,
+         family = gaussian(),
+         refresh = 0)
+
+print(model_4, digits = 9)
+
+model_2 <- stan_glm(data = contribution_votes,
+         vote_percentage ~ incumbent_challenge_full - 1,
+         family = gaussian(),
+         refresh = 0)
+
+print(model_2, digits = 4)
+
+# year as character value (value for each election)
+```
+
+```{r model p2}
+model %>% 
+  as_tibble() %>% 
+  mutate(receipts_intercept = `(Intercept)` + disbursements) %>% 
+  ggplot(aes(x = disbursements, y = after_stat(count/sum(count)))) +
+  geom_histogram(bins = 100)
+
+model_2 %>% 
+  as_tibble() %>% 
+  mutate(challenger = incumbent_challenge_fullChallenger,
+         incumbent = incumbent_challenge_fullIncumbent,
+         open_seat = `incumbent_challenge_fullOpen seat`) %>% 
+  pivot_longer(cols = challenger:open_seat,
+               names_to = "candidate_status",
+               values_to = "percent_vote") %>% 
+  ggplot(aes(x = percent_vote, y = after_stat(count/sum(count)), fill = candidate_status)) +
+  geom_histogram(bins = 300,
+                 alpha = .5)
+```
+
+
+
+```{r national partisan difference in spending}
+contribution_votes %>% 
+  mutate(year = as.numeric(year)) %>% 
+  filter(party == "DEM" | party == "REP") %>% 
+  ggplot(aes(x = year, y = disbursements/1000000, color = party)) + 
+  geom_point(alpha = .3) +
+  geom_smooth(alpha = .6) +
+  scale_color_manual(values = c("DEM" = "blue", "REP" = "red"), 
+                     labels = c("Democrat", "Republican")) +
+  labs(title = "Spending on Democratic and Republican Senate Campaigns,
+       1980 - 2018",
+       x = "Year",
+       y = "Spendings (in Millions of Dollars)",
+       color = "Party") +
+  theme_bw()
+```
+
+```{r spending margin for winners (by state)}
+win_pre <- contribution_votes %>% 
+  group_by(year, state_po, special) %>% 
+  mutate(max = max(vote_percentage, na.rm = FALSE)) %>% 
+  mutate(win = ifelse(vote_percentage == max, TRUE, FALSE)) 
+
+n_candidates <- win_pre %>% 
+  group_by(year, state_po, special) %>% 
+  tally()
+
+win <- inner_join(win_pre, n_candidates, by = c("year", "state_po", "special"))
+
+plot_1 <- win %>% 
+  filter(n == 2) %>% 
+  arrange(year, state_po, special, desc(vote_percentage)) %>% 
+  mutate(diff = disbursements[[1]] - disbursements[[2]]) %>% 
+  filter(win == "TRUE")
+
+plot_1 %>% 
+  filter(state.x == "Massachusetts") %>% 
+  ggplot(aes(x = year, y = diff, color = party)) +
+  geom_point(size = 5) 
+
+saveRDS(plot_1, "plot_1.RDS")
+```
+
+
+```{r}
+model_3_data <- win %>% 
+  mutate(year = as.character(year)) %>% 
+  filter(n == 2) %>% 
+  arrange(year, state_po, special, desc(vote_percentage)) %>% 
+  mutate(disbursements = ifelse(candidate == "Albert N. Gore, Jr.", 0, disbursements)) %>%
+  mutate(disbursements = ifelse(candidate == "Crystal Young", 0, disbursements)) %>%
+  mutate(disbursements = ifelse(candidate == "Shawn O'Hara", 0, disbursements)) %>%
+  mutate(disbursements = ifelse(candidate == "Charlie A. Matulka", 0, disbursements)) %>%
+  mutate(disbursements = ifelse(candidate == "Guy MacDonald", 0, disbursements)) %>%
+  mutate(diff = disbursements[[1]] - disbursements[[2]]) %>% 
+  filter(win == TRUE)
+
+# calculate expenditure percentages per candidate
+
+model_3 <- stan_glm(data = model_3_data,
+                    vote_percentage ~ diff + year,
+                    family = gaussian(),
+                    refresh = 0)
+
+print(model_3, digits = 9)
+
+```
+
+
+
 ```{r}
 fec %>% 
-    filter(state == "TX",
-           candidate_election_year == 2018) %>% 
-    mutate(distance = map_dbl(full_name, ~ stringdist(., "Beto O'Rourke")))
+    filter(state == "AK",
+           candidate_election_year == 1978) %>% 
+    mutate(distance = map_dbl(full_name, ~ stringdist(., "Donald Hobbs")))
 ```
 
