@@ -11,6 +11,7 @@ library(tidyverse)
 library(stringdist)
 library(rstanarm)
 library(tidymodels)
+library(gtsummary)
 ```
 
 ```{r reading data sets, message = FALSE, error = F}
@@ -108,13 +109,27 @@ contribution_votes <- left_join(fec_id_vote, fec,
 
 ```{r model 1}
 
+
+model_data <- contribution_votes %>% 
+  mutate(disbursements = as.numeric(disbursements)) %>% 
+  mutate(vote_percentage = as.numeric(vote_percentage))
+
 model_1 <- stan_glm(data = contribution_votes,
-         vote_percentage ~ disbursements + year - 1,
+         vote_percentage ~ disbursements,
          family = gaussian(),
          refresh = 0)
 
 print(model_1, digits = 9)
 
+
+model_1 %>% 
+  tbl_regression() %>% 
+  as_gt() 
+  
+
+```
+
+```{r}
 
 saveRDS(contribution_votes, "contribution_votes.RDS")
 
@@ -184,6 +199,34 @@ votes_wflow %>%
 
   
 ```
+
+
+```{r}
+data <- votes %>% 
+  filter(year == 2004)
+
+model_votes <- stan_glm(data = data,
+                        vote_percentage ~ disbursements,
+                        family = gaussian(),
+                        refresh = 0)
+
+
+data %>% 
+  ggplot(aes(x = disbursements, y = vote_percentage)) +
+  geom_point() +
+  geom_line(aes(y = fitted(model_votes)), color = "red") +
+  theme_classic() +
+  labs(title = "Relationship Between Campaign Expenditures and Percent of Overall Vote",
+       subtitle = "")
+
+
+data %>% 
+  ggplot(aes(x = disbursements, y = vote_percentage)) +
+  geom_point() +
+  geom_smooth(formula = y ~ x, method = "loess", color = "red") +
+  theme_classic() 
+```
+
 
 ```{r}
 
@@ -274,9 +317,6 @@ saveRDS(model_2_data, "model_2.RDS")
 
 
 input <- 2012
-
-
-
 
 model_2_data %>% 
   rename(year = as.character(input)) %>% 
@@ -390,7 +430,6 @@ model_3_data <- win %>%
   mutate(diff = disbursements[[1]] - disbursements[[2]]) %>% 
   filter(win == TRUE)
 
-# calculate expenditure percentages per candidate
 
 model_3 <- stan_glm(data = model_3_data,
                     vote_percentage ~ diff + year,
@@ -400,7 +439,6 @@ model_3 <- stan_glm(data = model_3_data,
 print(model_3, digits = 9)
 
 ```
-
 
 
 ```{r}
