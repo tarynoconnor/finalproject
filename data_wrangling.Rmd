@@ -10,9 +10,10 @@ knitr::opts_chunk$set(echo = TRUE)
 library(tidyverse)
 library(stringdist)
 library(rstanarm)
+library(tidymodels)
 ```
 
-```{r message = FALSE, error = F}
+```{r reading data sets, message = FALSE, error = F}
 sen_1980 <- read_csv("raw_data/senate_1980.csv")
 sen_1982 <- read_csv("raw_data/senate_1982.csv")
 sen_1984 <- read_csv("raw_data/senate_1984.csv")
@@ -39,7 +40,7 @@ mit_data <- read_csv("raw_data/1976-2018-senate.csv") %>%
 ```
 
 
-```{r message = FALSE}
+```{r fec and vote_totals, message = FALSE}
 fec <- rbind(sen_1980, sen_1982, 
              sen_1984, sen_1986, sen_1988, 
              sen_1990, sen_1992, sen_1994, 
@@ -75,7 +76,7 @@ vote_totals <- mit_data %>%
 
 
 
-```{r}
+```{r stringdist function}
 name <- function(candidate, year, state_po){
   fec %>% 
     filter(state == state_po) %>% 
@@ -86,7 +87,7 @@ name <- function(candidate, year, state_po){
 }
 ```
 
-```{r}
+```{r fec_id}
 fec_id_vote <- vote_totals %>%
   mutate(candidate_id = pmap_chr(list(candidate = candidate, 
                                 candidate_election_year = year, 
@@ -96,34 +97,32 @@ fec_id_vote <- vote_totals %>%
                                        state = ..3)))
 ```
 
-
-```{r}
+```{r joining}
 contribution_votes <- left_join(fec_id_vote, fec, 
-                                 by = c("candidate_id", "year")) %>% 
+                                by = c("candidate_id", "year")) %>% 
   mutate(year = as.character(year)) %>% 
-  mutate(party = ifelse(party == "DFL", "DEM", party))
+  mutate(party = ifelse(party == "DFL", "DEM", party)) %>% 
+  mutate(disbursements = disbursements/1000)
 ```
 
 
-```{r model p1}
-model <- stan_glm(data = contribution_votes,
-         vote_percentage ~ disbursements,
+```{r model 1}
+
+model_1 <- stan_glm(data = contribution_votes,
+         vote_percentage ~ disbursements + year - 1,
          family = gaussian(),
          refresh = 0)
 
-print(model, digits = 9)
+print(model_1, digits = 9)
 
-#change disbursements to thousands
 
-model_4 <- stan_glm(data = contribution_votes,
-         vote_percentage ~ disbursements + year,
-         family = gaussian(),
-         refresh = 0)
+saveRDS(contribution_votes, "contribution_votes.RDS")
 
-print(model_4, digits = 9)
+```
 
+```{r model 2}
 model_2 <- stan_glm(data = contribution_votes,
-         vote_percentage ~ incumbent_challenge_full - 1,
+         vote_percentage ~ incumbent_challenge_full + year - 1,
          family = gaussian(),
          refresh = 0)
 
@@ -132,6 +131,87 @@ print(model_2, digits = 4)
 # year as character value (value for each election)
 ```
 
+```{r}
+votes <- contribution_votes %>% 
+  ungroup() %>% 
+  select(year, disbursements, vote_percentage) %>% 
+  drop_na()
+votes_split <- initial_split(votes, prop = .8)
+votes_train <- training(votes_split)
+votes_test <- training(votes_split)
+
+saveRDS(votes, "votes.RDS")
+saveRDS(votes_train, "votes_train.RDS")
+saveRDS(votes_test, "votes_test.RDS")
+
+
+
+votes <- contribution_votes %>% 
+  ungroup() %>% 
+  select(year, disbursements, vote_percentage) %>% 
+  filter(year == 2012) %>% 
+  drop_na()
+
+votes_split <- initial_split(votes, prop = .8)
+votes_train <- training(votes_split)
+votes_test <- training(votes_split)
+votes_folds <- vfold_cv(votes_train, v = 10)
+
+votes_rec <-
+  recipe(vote_percentage ~ disbursements, data = votes_train) 
+
+votes_model <- linear_reg() %>% 
+  set_engine("lm") %>% 
+  set_mode("regression")
+
+votes_wflow <-
+  workflow() %>% 
+  add_model(votes_model) %>% 
+  add_recipe(votes_rec)
+
+votes_metrics <- votes_wflow %>% 
+  fit_resamples(resamples = votes_folds) %>% 
+  collect_metrics()
+
+votes_wflow %>% 
+  fit(data = votes_train) %>% 
+  predict(new_data = votes_train) %>% 
+  bind_cols(votes_train %>% select(vote_percentage)) %>% 
+  ggplot(aes(x = vote_percentage, y = .pred)) +
+  geom_point(alpha = .5)
+  
+
+
+  
+```
+
+```{r}
+
+votes_wfl <- workflow() %>% 
+  add_model(linear_reg() %>%
+            set_engine("stan") %>%
+            set_mode("regression")) %>% 
+  add_recipe(recipe(vote_percentage ~  disbursements,
+                    data = votes_train) %>% 
+             step_dummy(all_nominal())
+             ) 
+
+votes_wfl %>% 
+  fit(data = training(initial_split(votes, prop = .8))) %>% 
+  predict(new_data = training(initial_split(votes, prop = .8))) %>% 
+  bind_cols(votes_train %>% select(vote_percentage)) %>% 
+  ggplot(aes(x = vote_percentage, y = .pred)) +
+    geom_point()
+
+votes_metrics <- votes_wfl %>% 
+  fit_resamples(resamples = votes_folds) %>% 
+  collect_metrics()
+
+
+votes_metrics
+```
+
+
 ```{r model p2}
 model %>% 
   as_tibble() %>% 
@@ -139,17 +219,82 @@ model %>%
   ggplot(aes(x = disbursements, y = after_stat(count/sum(count)))) +
   geom_histogram(bins = 100)
 
-model_2 %>% 
+model_2_data <- model_2 %>% 
   as_tibble() %>% 
+  add_column(year1980 = 0) %>% 
   mutate(challenger = incumbent_challenge_fullChallenger,
          incumbent = incumbent_challenge_fullIncumbent,
-         open_seat = `incumbent_challenge_fullOpen seat`) %>% 
+         open_seat = `incumbent_challenge_fullOpen seat`,
+         `1980` = year1980,
+         `1982` = year1982,
+         `1984` = year1984,
+         `1986` = year1986,
+         `1988` = year1988,
+         `1990` = year1990,
+         `1992` = year1992,
+         `1994` = year1994,
+         `1996` = year1996,
+         `1998` = year1998,
+         `2000` = year2000,
+         `2002` = year2002,
+         `2004` = year2004,
+         `2006` = year2006,
+         `2008` = year2008,
+         `2010` = year2010,
+         `2012` = year2012,
+         `2014` = year2014,
+         `2016` = year2016,
+         `2018` = year2018) %>% 
   pivot_longer(cols = challenger:open_seat,
                names_to = "candidate_status",
                values_to = "percent_vote") %>% 
-  ggplot(aes(x = percent_vote, y = after_stat(count/sum(count)), fill = candidate_status)) +
-  geom_histogram(bins = 300,
-                 alpha = .5)
+  mutate(`1980` = `1980` + percent_vote,
+         `1982` = `1982` + percent_vote,
+         `1984` = `1984` + percent_vote,
+         `1986` = `1986` + percent_vote,
+         `1988` = `1988` + percent_vote,
+         `1990` = `1990` + percent_vote,
+         `1992` = `1992` + percent_vote,
+         `1994` = `1994` + percent_vote,
+         `1996` = `1996` + percent_vote,
+         `1998` = `1998` + percent_vote,
+         `2000` = `2000` + percent_vote,
+         `2002` = `2002` + percent_vote,
+         `2004` = `2004` + percent_vote,
+         `2006` = `2006` + percent_vote,
+         `2008` = `2008` + percent_vote,
+         `2010` = `2010` + percent_vote,
+         `2012` = `2012` + percent_vote,
+         `2014` = `2014` + percent_vote,
+         `2016` = `2016` + percent_vote,
+         `2018` = `2018` + percent_vote) %>% 
+  select(`1980`:percent_vote)
+  
+saveRDS(model_2_data, "model_2.RDS")
+
+
+input <- 2012
+
+
+
+
+model_2_data %>% 
+  rename(year = as.character(input)) %>% 
+  mutate()
+
+model_2_data %>% 
+  mutate(year = select(as.character(input)))
+  
+  
+  mutate(total = select(as.character(input), percent_vote) %>% 
+           rowSums())
+
+model_2_data %>% 
+  rename(year = as.character(input)) %>%
+  ggplot(aes(x = year, y = after_stat(count/sum(count)), fill = candidate_status)) +
+  geom_histogram(bins = 100,
+                 alpha = .5,
+                 position = "identity")
 ```
 
 
@@ -183,6 +328,23 @@ n_candidates <- win_pre %>%
 
 win <- inner_join(win_pre, n_candidates, by = c("year", "state_po", "special"))
 
+win %>% 
+  filter(year == 2000) %>% 
+  ggplot(aes(x = disbursements, y = vote_percentage)) +
+    geom_point(aes(color = win)) +
+    geom_smooth(formula = y ~ x, method = "lm", se = FALSE, alpha = .6, color = "black") +
+  scale_color_manual(breaks = c("TRUE", "FALSE"),
+                     values = c("TRUE" = "green", "FALSE" = "red"),
+                     labels = c("Yes", "No")) +
+  theme_bw() +
+  labs(title = "Campaign Disbursements and Percentage of Votes",
+       subtitle = )
+
+ 
+```
+
+
+```{r}
 plot_1 <- win %>% 
   filter(n == 2) %>% 
   arrange(year, state_po, special, desc(vote_percentage)) %>% 
@@ -192,7 +354,24 @@ plot_1 <- win %>%
 plot_1 %>% 
   filter(state.x == "Massachusetts") %>% 
   ggplot(aes(x = year, y = diff, color = party)) +
-  geom_point(size = 5) 
+  geom_point(size = 5) +
+  scale_color_manual(breaks = c("DEM", "REP", "IND"),
+                     values = c("DEM" = "darkblue", "REP" = "darkred", "IND" = "darkgreen"), 
+                     labels = c("Democrat", "Republican", "Independent")) +
+  labs(title = "",
+       subtitle = "How much winners outspent their opponents in races with two major contenders",
+       x = "Election Year",
+       y = "Spending Margin (in Millions of Dollars)",
+       color = "Party") +
+  scale_x_discrete(breaks = c(1980, 1982, 1984, 1986, 1988, 1990, 
+                                          1992, 1994, 1996, 1998, 2000, 2002, 
+                                          2004, 2006, 2008, 2010, 2012, 2014, 
+                                          2016, 2018)) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::comma) +
+  theme(text = element_text(size = 15), 
+        axis.text = element_text(size = 12), 
+        axis.title = element_text(size = 20,face = "bold"))
 
 saveRDS(plot_1, "plot_1.RDS")
 ```
@@ -225,9 +404,6 @@ print(model_3, digits = 9)
 
 
 ```{r}
-fec %>% 
-    filter(state == "AK",
-           candidate_election_year == 1978) %>% 
-    mutate(distance = map_dbl(full_name, ~ stringdist(., "Donald Hobbs")))
+
 ```
 
