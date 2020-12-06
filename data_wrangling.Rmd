@@ -109,7 +109,6 @@ contribution_votes <- left_join(fec_id_vote, fec,
 
 ```{r model 1}
 
-
 model_data <- contribution_votes %>% 
   mutate(disbursements = as.numeric(disbursements)) %>% 
   mutate(vote_percentage = as.numeric(vote_percentage))
