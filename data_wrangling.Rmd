@@ -12,6 +12,7 @@ library(stringdist)
 library(rstanarm)
 library(tidymodels)
 library(gtsummary)
+library(gt)
 
 
 ```
@@ -209,7 +210,12 @@ contribution_votes <- left_join(fec_id_vote, fec,
 # I also changed disbursements to be represented in thousands of dollars, in order
 # to make any graphs cleaner.
   
-  mutate(disbursements = disbursements/1000)
+  mutate(disbursements = disbursements/1000) %>% 
+
+# Since the FEC data had NA's for many challengers in the incumbent_challenge_full
+# column for elections from 1980 - 1986, I replaced these NA's with "Challenger"
+    
+  replace_na(list(incumbent_challenge_full = "Challenger"))
 
 ```
 
@@ -226,24 +232,31 @@ votes <- contribution_votes %>%
   
   drop_na()
 
+votes_split <- initial_split(votes, prop = .8)
+votes_train <- training(votes_split)
+votes_test <- training(votes_split)
+votes_folds <- vfold_cv(votes_train, v = 10)
+
 # In my app, there is an option to select a year, which is then filtered out of
 # the object votes. An example will be made with the year set to 2018
 
-votes <- votes %>% 
+votes_ex <- votes %>% 
   filter(year == 1998)
 
 # To make my linear model, I first used stan_glm to find the relationship between
 # disbursements and vote_percentage
 
-model_votes <- stan_glm(data = votes,
+model_votes <- stan_glm(data = votes_ex,
                         vote_percentage ~ disbursements,
                         family = gaussian(),
                         refresh = 0)
 
+print(model_votes, digits = 4)
+
 # I then used this model to generate a graph showing the linear relationship 
 # with all of the data points for the given year. 
 
-votes %>% 
+votes_ex %>% 
   ggplot(aes(x = disbursements, y = vote_percentage)) +
   geom_point() +
   geom_line(aes(y = fitted(model_votes)), color = "red") +
@@ -255,7 +268,7 @@ votes %>%
 # than the linear model. This was achieved by inserting a formula with the method
 # "loess", instead of using the stan_glm model. 
 
-votes %>% 
+votes_ex %>% 
   ggplot(aes(x = disbursements, y = vote_percentage)) +
   geom_point() +
   geom_smooth(formula = y ~ x, method = "loess", color = "red") +
@@ -268,10 +281,10 @@ votes %>%
 # metrics
 
 
-votes_split <- initial_split(votes, prop = .8)
-votes_train <- training(votes_split)
-votes_test <- training(votes_split)
-votes_folds <- vfold_cv(votes_train, v = 10)
+votes_ex_split <- initial_split(votes_ex, prop = .8)
+votes_ex_train <- training(votes_ex_split)
+votes_ex_test <- training(votes_ex_split)
+votes_ex_folds <- vfold_cv(votes_ex_train, v = 10)
 
 # Then, I piped workflow() into a linear regression stan model, using the same
 # formula as model_votes in the recipe
@@ -281,7 +294,7 @@ votes_wfl <- workflow() %>%
             set_engine("stan") %>%
             set_mode("regression")) %>% 
   add_recipe(recipe(vote_percentage ~  disbursements,
-                    data = votes_train) %>% 
+                    data = votes_ex_train) %>% 
              step_dummy(all_nominal())
              ) 
 
@@ -290,24 +303,30 @@ votes_wfl <- workflow() %>%
 # vote percentages and plotted them. 
 
 votes_wfl %>% 
-  fit(data = votes_train) %>% 
-  predict(new_data = votes_test) %>% 
-  bind_cols(votes_train %>% select(vote_percentage)) %>% 
+  fit(data = votes_ex_train) %>% 
+  predict(new_data = votes_ex_test) %>% 
+  bind_cols(votes_ex_train %>% select(vote_percentage)) %>% 
   ggplot(aes(x = vote_percentage, y = .pred)) +
     geom_point()
 
 # I then ran metrics on the workflow by resampling with the folds dataset
 
 votes_metrics <- votes_wfl %>% 
-  fit_resamples(resamples = votes_folds) %>% 
+  fit_resamples(resamples = votes_ex_folds) %>% 
   collect_metrics()
 
 
-votes_metrics
+votes_metrics %>% 
+  rename("Metric" = .metric,
+         "Mean" = mean,
+         "Estimator" = .estimator,
+         "Standard Error" = std_err) %>% 
+  gt()
+  
   
 ```
 
-
+ 
 ```{r incumbent model}
 # I was also curious to see what other factors can play into the outcome of an 
 # election, so I looked at how incumbents and challengers often performed over
@@ -396,8 +415,93 @@ model_2_data %>%
                  alpha = .5,
                  position = "identity")
 
+
 ```
 
+```{r incumbent/challenger/open_seat comparison}
+
+# In order to determine if there is any difference in the models when broken
+# down by type of candidate, I generated regressions for each type of candidate
+# In my app, the year can be inputted, with the below being the input should
+# 1980 be chosen.
+
+# For each type of candidate, I made a dataset filtered to the year and type of
+# candidate. I also used drop_na in order to plot the regressions later on
+
+challenger <- contribution_votes %>% 
+  filter(year == 1980) %>% 
+  filter(incumbent_challenge_full == "Challenger") %>% 
+  drop_na()
+
+incumbent <- contribution_votes %>% 
+  filter(year == 1980) %>% 
+  filter(incumbent_challenge_full == "Incumbent") %>% 
+  drop_na()
+
+open_seat <- contribution_votes %>% 
+  filter(year == 1982) %>% 
+  filter(incumbent_challenge_full == "Open seat") %>% 
+  drop_na()
+
+# I then made models with each dataset that measured the effect of disbursements
+# on vote_percentage
+
+model_4 <- stan_glm(data = incumbent,
+         vote_percentage ~ disbursements,
+         family = gaussian(),
+         refresh = 0)
+
+model_5 <- stan_glm(data = challenger,
+         vote_percentage ~ disbursements,
+         family = gaussian(),
+         refresh = 0)
+
+model_6 <- stan_glm(data = open_seat,
+         vote_percentage ~ disbursements,
+         family = gaussian(),
+         refresh = 0)
+
+# I then took these models and plotted them on one graph
+
+incumbent %>% 
+  ggplot(aes(x = disbursements, 
+             y = vote_percentage)) +
+  
+# I also included a scatter plot with campaigns being identified as incumbents,
+# challengers, or open seats
+  
+  geom_point(aes(color = "blue")) +
+  geom_line(aes(y = fitted(model_4), 
+                color = "blue")) +
+  geom_point(data = challenger, 
+             aes(x = disbursements, 
+                 y = vote_percentage, 
+                 color = "red")) +
+  geom_line(data = challenger, 
+            aes(y = fitted(model_5),
+                color = "red")) +
+  geom_point(data = open_seat,
+             aes(x = disbursements, 
+                 y = vote_percentage,
+                 color = "yellow")) +
+  geom_line(data = open_seat, 
+            aes(y = fitted(model_6), 
+                color = "yellow")) +
+  
+# I then ordered and renamed the scale such that it matched the posterior 
+# distribution that would be on the same tab
+  
+  scale_color_manual(breaks = c("red", "blue", "yellow"),
+                     values = c("blue" = "blue", 
+                               "yellow" = "#FFCC33",
+                               "red" = "red"),
+                     labels = c("Challenger", "Incumbent", "Open Seat")) +
+  theme_classic()
+
+# I opted not to put tables measuring the reliability, since there was often
+# not enough data for an accurate measurement
+
+```
 
 
 ```{r national partisan difference in spending}
@@ -421,7 +525,7 @@ contribution_votes %>%
        x = "Year",
        y = "Spendings (in Millions of Dollars)",
        color = "Party") +
-  theme_bw()
+  theme_bw() 
 ```
 
 ```{r spending margin for winners (by state)}
@@ -445,6 +549,8 @@ n_candidates <- win_pre %>%
   tally()
 
 win <- inner_join(win_pre, n_candidates, by = c("year", "state_po", "special"))
+
+
 
 ```
 
@@ -481,7 +587,8 @@ plot_1 <- win %>%
 # as the difference equalled how much the winner outspent their opponent
   
   mutate(diff = disbursements[[1]] - disbursements[[2]]) %>% 
-  filter(win == "TRUE")
+  filter(win == "TRUE") %>% 
+  drop_na()
 
 # I then made a plot where one can choose a state and it shows the outspending for
 # each Senate campaign with 2 major contenders (example below with Massachusetts)
@@ -515,29 +622,6 @@ plot_1 %>%
 ```
 
 
-```{r work in progress}
-
-# This is a model I am considering adding to my app. It looks at the relationship
-# between vote_percentage and how much candidates outspend eachother.
-
-model_3_data <- win %>% 
-  mutate(year = as.character(year)) %>% 
-  filter(n == 2) %>% 
-  arrange(year, state_po, special, desc(vote_percentage)) 
-  mutate(diff = disbursements[[1]] - disbursements[[2]]) %>% 
-  filter(win == TRUE)
-
-
-model_3 <- stan_glm(data = model_3_data,
-                    vote_percentage ~ diff + year,
-                    family = gaussian(),
-                    refresh = 0)
-
-print(model_3, digits = 9)
-
-```
-
-
 ```{r shiny app data}
 
 # For my app, I saved each of my datasets as .RDS files to load in the app
@@ -546,5 +630,8 @@ saveRDS(contribution_votes, "contribution_votes.RDS")
 saveRDS(model_2_data, "model_2.RDS")
 saveRDS(plot_1, "plot_1.RDS")
 saveRDS(votes, "votes.RDS")
+saveRDS(votes_split, "votes_split.RDS")
+saveRDS(votes_train, "votes_train.RDS")
+saveRDS(votes_test , "votes_test.RDS")
 ```
 
